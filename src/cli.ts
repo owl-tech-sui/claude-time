@@ -4,7 +4,11 @@
  * デーモン管理とスケジュール確認用のCLI
  */
 
-import { spawn } from 'child_process';
+import { spawn, execSync } from 'child_process';
+import { existsSync, writeFileSync, unlinkSync, readFileSync } from 'fs';
+import { homedir } from 'os';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import { Storage } from './storage.js';
 import {
   LOG_FILE,
@@ -13,6 +17,13 @@ import {
   checkDaemonRunning,
 } from './pid.js';
 import { formatDateTime, getConfigInfo } from './config.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+/** launchd plistファイルのパス */
+const PLIST_NAME = 'com.claude-time.daemon.plist';
+const PLIST_PATH = join(homedir(), 'Library', 'LaunchAgents', PLIST_NAME);
 
 /** デーモン開始 */
 function daemonStart(): void {
@@ -161,6 +172,142 @@ function showLogs(scheduleId?: string, limit: number = 10): void {
   }
 }
 
+/** launchd にインストール */
+function install(): void {
+  if (process.platform !== 'darwin') {
+    console.error('❌ This command is only available on macOS.');
+    console.log('   For Linux, use systemd to manage the daemon.');
+    return;
+  }
+
+  // 既にインストールされているか確認
+  if (existsSync(PLIST_PATH)) {
+    console.log('⚠️ claude-time is already installed.');
+    console.log(`   Plist: ${PLIST_PATH}`);
+    console.log('   Run `claude-time uninstall` first if you want to reinstall.');
+    return;
+  }
+
+  // daemon.js のパス
+  const daemonPath = join(__dirname, 'daemon.js');
+  const nodePath = process.execPath;
+
+  // plistファイルの内容
+  const plistContent = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.claude-time.daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${nodePath}</string>
+        <string>${daemonPath}</string>
+        <string>--foreground</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>${LOG_FILE}</string>
+    <key>StandardErrorPath</key>
+    <string>${LOG_FILE}</string>
+    <key>WorkingDirectory</key>
+    <string>${dirname(__dirname)}</string>
+</dict>
+</plist>
+`;
+
+  try {
+    // LaunchAgents ディレクトリが存在することを確認
+    const launchAgentsDir = dirname(PLIST_PATH);
+    if (!existsSync(launchAgentsDir)) {
+      console.error(`❌ Directory not found: ${launchAgentsDir}`);
+      return;
+    }
+
+    // plistファイルを作成
+    writeFileSync(PLIST_PATH, plistContent);
+    console.log(`✅ Created: ${PLIST_PATH}`);
+
+    // launchctl でロード
+    try {
+      execSync(`launchctl load ${PLIST_PATH}`, { stdio: 'pipe' });
+      console.log('✅ Loaded into launchd');
+    } catch (loadError) {
+      console.log('⚠️ Could not load automatically. Run manually:');
+      console.log(`   launchctl load ${PLIST_PATH}`);
+    }
+
+    console.log('\n🎉 Installation complete!');
+    console.log('   The daemon will now start automatically on login.');
+    console.log('   Check status: claude-time daemon status');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`❌ Installation failed: ${message}`);
+  }
+}
+
+/** launchd からアンインストール */
+function uninstall(): void {
+  if (process.platform !== 'darwin') {
+    console.error('❌ This command is only available on macOS.');
+    return;
+  }
+
+  if (!existsSync(PLIST_PATH)) {
+    console.log('ℹ️ claude-time is not installed (no plist found).');
+    return;
+  }
+
+  try {
+    // launchctl でアンロード
+    try {
+      execSync(`launchctl unload ${PLIST_PATH}`, { stdio: 'pipe' });
+      console.log('✅ Unloaded from launchd');
+    } catch (unloadError) {
+      console.log('⚠️ Could not unload (may already be unloaded)');
+    }
+
+    // plistファイルを削除
+    unlinkSync(PLIST_PATH);
+    console.log(`✅ Removed: ${PLIST_PATH}`);
+
+    console.log('\n🎉 Uninstallation complete!');
+    console.log('   The daemon will no longer start automatically.');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`❌ Uninstallation failed: ${message}`);
+  }
+}
+
+/** インストール状態を表示 */
+function showInstallStatus(): void {
+  if (process.platform !== 'darwin') {
+    console.log('ℹ️ Auto-start is only available on macOS (launchd).');
+    return;
+  }
+
+  if (existsSync(PLIST_PATH)) {
+    console.log('✅ claude-time is installed for auto-start');
+    console.log(`   Plist: ${PLIST_PATH}`);
+
+    // launchctl で状態確認
+    try {
+      const result = execSync('launchctl list | grep com.claude-time', { encoding: 'utf-8' });
+      if (result.includes('com.claude-time')) {
+        console.log('   Status: Loaded in launchd');
+      }
+    } catch {
+      console.log('   Status: Not currently loaded');
+    }
+  } else {
+    console.log('❌ claude-time is not installed for auto-start');
+    console.log('   Run `claude-time install` to enable auto-start on login.');
+  }
+}
+
 /** ヘルプ */
 function showHelp(): void {
   console.log(`
@@ -168,6 +315,11 @@ claude-time - Claude Code Scheduler
 
 Usage:
   claude-time <command> [options]
+
+Setup Commands (macOS):
+  install          Install auto-start on login (launchd)
+  uninstall        Remove auto-start
+  status           Show installation and daemon status
 
 Daemon Commands:
   daemon start     Start the background daemon
@@ -189,10 +341,10 @@ Note:
   - schedule_resume
 
 Examples:
-  claude-time daemon start
-  claude-time daemon status
-  claude-time list
-  claude-time logs -n 20
+  claude-time install        # Enable auto-start
+  claude-time daemon start   # Start manually
+  claude-time daemon status  # Check status
+  claude-time list           # List schedules
 `);
 }
 
@@ -225,6 +377,20 @@ const args = process.argv.slice(2);
 const command = args[0] || 'help';
 
 switch (command) {
+  case 'install':
+    install();
+    break;
+
+  case 'uninstall':
+    uninstall();
+    break;
+
+  case 'status':
+    showInstallStatus();
+    console.log();
+    daemonStatus();
+    break;
+
   case 'daemon':
     const subCommand = args[1] || 'status';
     switch (subCommand) {

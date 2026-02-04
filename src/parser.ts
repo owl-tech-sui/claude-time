@@ -287,9 +287,94 @@ export function parseSchedule(input: string): ParseResult {
     };
   }
 
+  // 明日X時 / 明日X時Y分 (一回限り)
+  const tomorrowMatch = normalized.match(/明日\s*(\d{1,2})時(?:(\d{1,2})分)?/);
+  if (tomorrowMatch) {
+    const hour = parseInt(tomorrowMatch[1], 10);
+    const minute = tomorrowMatch[2] ? parseInt(tomorrowMatch[2], 10) : 0;
+    if (isValidTime(hour, minute)) {
+      const tomorrow = new Date();
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      return {
+        success: true,
+        cron_expression: `${minute} ${hour} ${tomorrow.getDate()} ${tomorrow.getMonth() + 1} *`,
+        human_readable: `明日 ${hour}:${minute.toString().padStart(2, '0')}`,
+      };
+    }
+  }
+
+  // tomorrow at TIME (一回限り)
+  const tomorrowEngMatch = normalized.match(/tomorrow\s+(?:at\s+)?(.+)/);
+  if (tomorrowEngMatch) {
+    const time = parseTime(tomorrowEngMatch[1].trim());
+    if (time) {
+      const tomorrow = new Date();
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      return {
+        success: true,
+        cron_expression: `${time[1]} ${time[0]} ${tomorrow.getDate()} ${tomorrow.getMonth() + 1} *`,
+        human_readable: `Tomorrow at ${time[0]}:${time[1].toString().padStart(2, '0')}`,
+      };
+    }
+  }
+
+  // 単純な時刻指定 "11:09" → 毎日11:09として解釈
+  const simpleTimeColonMatch = normalized.match(/^(\d{1,2}):(\d{2})$/);
+  if (simpleTimeColonMatch) {
+    const hour = parseInt(simpleTimeColonMatch[1], 10);
+    const minute = parseInt(simpleTimeColonMatch[2], 10);
+    if (isValidTime(hour, minute)) {
+      return {
+        success: true,
+        cron_expression: `${minute} ${hour} * * *`,
+        human_readable: `Every day at ${hour}:${minute.toString().padStart(2, '0')}`,
+      };
+    }
+  }
+
+  // 単純な日本語時刻 "9時" "9時30分" → 毎日として解釈
+  const simpleJpTimeMatch = normalized.match(/^(\d{1,2})時(?:(\d{1,2})分)?$/);
+  if (simpleJpTimeMatch) {
+    const hour = parseInt(simpleJpTimeMatch[1], 10);
+    const minute = simpleJpTimeMatch[2] ? parseInt(simpleJpTimeMatch[2], 10) : 0;
+    if (isValidTime(hour, minute)) {
+      return {
+        success: true,
+        cron_expression: `${minute} ${hour} * * *`,
+        human_readable: `毎日 ${hour}:${minute.toString().padStart(2, '0')}`,
+      };
+    }
+  }
+
+  // X時間後 (一回限り)
+  const inHoursMatch = normalized.match(/(\d+)時間後/);
+  if (inHoursMatch) {
+    const hoursLater = parseInt(inHoursMatch[1], 10);
+    const now = new Date();
+    const target = new Date(now.getTime() + hoursLater * 60 * 60 * 1000);
+    return {
+      success: true,
+      cron_expression: `${target.getMinutes()} ${target.getHours()} ${target.getDate()} ${target.getMonth() + 1} *`,
+      human_readable: `${hoursLater}時間後 (${target.getHours()}:${target.getMinutes().toString().padStart(2, '0')})`,
+    };
+  }
+
+  // in X hours (一回限り)
+  const inHoursEngMatch = normalized.match(/in\s+(\d+)\s+hours?/);
+  if (inHoursEngMatch) {
+    const hoursLater = parseInt(inHoursEngMatch[1], 10);
+    const now = new Date();
+    const target = new Date(now.getTime() + hoursLater * 60 * 60 * 1000);
+    return {
+      success: true,
+      cron_expression: `${target.getMinutes()} ${target.getHours()} ${target.getDate()} ${target.getMonth() + 1} *`,
+      human_readable: `In ${hoursLater} hour${hoursLater > 1 ? 's' : ''} (${target.getHours()}:${target.getMinutes().toString().padStart(2, '0')})`,
+    };
+  }
+
   return {
     success: false,
-    error: `Could not parse schedule: "${input}". Try formats like "every day at 9:00", "毎日9時", "every 5 minutes", or a cron expression.`,
+    error: `Could not parse schedule: "${input}". Try formats like "every day at 9:00", "毎日9時", "9:00", "9時", "every 5 minutes", or a cron expression.`,
   };
 }
 

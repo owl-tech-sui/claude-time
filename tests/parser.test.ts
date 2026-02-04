@@ -115,6 +115,56 @@ describe('parseSchedule', () => {
     });
   });
 
+  describe('simple time patterns', () => {
+    it('should parse "11:09" as daily', () => {
+      const result = parseSchedule('11:09');
+      expect(result.success).toBe(true);
+      expect(result.cron_expression).toBe('9 11 * * *');
+    });
+
+    it('should parse "9時" as daily', () => {
+      const result = parseSchedule('9時');
+      expect(result.success).toBe(true);
+      expect(result.cron_expression).toBe('0 9 * * *');
+    });
+
+    it('should parse "21時30分" as daily', () => {
+      const result = parseSchedule('21時30分');
+      expect(result.success).toBe(true);
+      expect(result.cron_expression).toBe('30 21 * * *');
+    });
+
+    it('should parse "5分後" as one-time', () => {
+      const result = parseSchedule('5分後');
+      expect(result.success).toBe(true);
+      expect(result.cron_expression).toMatch(/^\d+ \d+ \d+ \d+ \*$/);
+    });
+
+    it('should parse "明日9時" as one-time', () => {
+      const result = parseSchedule('明日9時');
+      expect(result.success).toBe(true);
+      expect(result.cron_expression).toMatch(/^0 9 \d+ \d+ \*$/);
+    });
+
+    it('should parse "2時間後" as one-time', () => {
+      const result = parseSchedule('2時間後');
+      expect(result.success).toBe(true);
+      expect(result.cron_expression).toMatch(/^\d+ \d+ \d+ \d+ \*$/);
+    });
+
+    it('should parse "in 30 minutes" as one-time', () => {
+      const result = parseSchedule('in 30 minutes');
+      expect(result.success).toBe(true);
+      expect(result.cron_expression).toMatch(/^\d+ \d+ \d+ \d+ \*$/);
+    });
+
+    it('should parse "tomorrow at 9:00" as one-time', () => {
+      const result = parseSchedule('tomorrow at 9:00');
+      expect(result.success).toBe(true);
+      expect(result.cron_expression).toMatch(/^0 9 \d+ \d+ \*$/);
+    });
+  });
+
   describe('time validation', () => {
     it('should reject invalid hour (25:00)', () => {
       const result = parseSchedule('every day at 25:00');

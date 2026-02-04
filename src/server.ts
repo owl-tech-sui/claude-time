@@ -9,12 +9,16 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { v4 as uuidv4 } from 'uuid';
-import { existsSync, statSync } from 'fs';
-import { isAbsolute, resolve } from 'path';
+import { existsSync, statSync, createWriteStream } from 'fs';
+import { isAbsolute, resolve, dirname, join } from 'path';
+import { spawn } from 'child_process';
+import { fileURLToPath } from 'url';
 import { Storage } from './storage.js';
 import { parseSchedule, getNextRunTime } from './parser.js';
 import { executeSchedule } from './executor.js';
 import { formatDateTime } from './config.js';
+import { checkDaemonRunning, readPid, isProcessRunning, LOG_FILE } from './pid.js';
+import { sendNotification } from './notifier.js';
 import type { Schedule, ScheduleInput, ScheduleAddResult } from './types.js';
 
 /**
@@ -230,6 +234,30 @@ export class MCPServer {
             },
           },
         },
+        {
+          name: 'daemon_status',
+          description: 'Check if the daemon is running',
+          inputSchema: {
+            type: 'object',
+            properties: {},
+          },
+        },
+        {
+          name: 'daemon_start',
+          description: 'Start the daemon in background',
+          inputSchema: {
+            type: 'object',
+            properties: {},
+          },
+        },
+        {
+          name: 'daemon_stop',
+          description: 'Stop the daemon',
+          inputSchema: {
+            type: 'object',
+            properties: {},
+          },
+        },
       ],
     }));
 
@@ -271,6 +299,15 @@ export class MCPServer {
 
           case 'schedule_cleanup':
             return this.handleScheduleCleanup(args as { days?: number });
+
+          case 'daemon_status':
+            return this.handleDaemonStatus();
+
+          case 'daemon_start':
+            return this.handleDaemonStart();
+
+          case 'daemon_stop':
+            return this.handleDaemonStop();
 
           default:
             throw new Error(`Unknown tool: ${name}`);
@@ -351,6 +388,12 @@ export class MCPServer {
       ? formatDateTime(nextRun)
       : 'Unknown';
 
+    // デーモン状態をチェック
+    const { running: daemonRunning } = checkDaemonRunning();
+    const daemonWarning = daemonRunning
+      ? ''
+      : `\n⚠️ **Warning**: Daemon is not running! Schedules won't execute.\nRun \`claude-time daemon start\` to start the daemon.`;
+
     return {
       content: [{
         type: 'text',
@@ -361,8 +404,7 @@ export class MCPServer {
           `- **Cron**: ${result.cron_expression}`,
           `- **Next run**: ${nextRunFormatted}`,
           `- **ID**: ${result.id}`,
-          ``,
-          `Note: Start the daemon with \`claude-time daemon start\` to execute schedules.`,
+          daemonWarning,
         ].join('\n'),
       }],
     };
@@ -714,9 +756,155 @@ export class MCPServer {
     };
   }
 
+  private async handleDaemonStatus() {
+    const { running, pid } = checkDaemonRunning();
+
+    if (!running) {
+      return {
+        content: [{
+          type: 'text',
+          text: [
+            `⚠️ **Daemon is not running**`,
+            ``,
+            `Schedules won't execute until the daemon is started.`,
+            `Use the \`daemon_start\` tool or run \`claude-time daemon start\` to start it.`,
+          ].join('\n'),
+        }],
+      };
+    }
+
+    const schedules = this.storage.getEnabledSchedules();
+    const nextSchedule = schedules.length > 0 && schedules[0].next_run_at
+      ? `Next: ${schedules[0].name} at ${formatDateTime(schedules[0].next_run_at)}`
+      : 'No scheduled tasks';
+
+    return {
+      content: [{
+        type: 'text',
+        text: [
+          `✅ **Daemon is running** (PID: ${pid})`,
+          ``,
+          `- Active schedules: ${schedules.length}`,
+          `- ${nextSchedule}`,
+          `- Log file: ${LOG_FILE}`,
+        ].join('\n'),
+      }],
+    };
+  }
+
+  private async handleDaemonStart() {
+    const { running, pid: existingPid } = checkDaemonRunning();
+    if (running) {
+      return {
+        content: [{
+          type: 'text',
+          text: `✅ Daemon is already running (PID: ${existingPid})`,
+        }],
+      };
+    }
+
+    // daemon.js のパスを取得
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = dirname(__filename);
+    const daemonScript = join(__dirname, 'daemon.js');
+
+    // バックグラウンドで起動
+    const child = spawn('node', [daemonScript, '--foreground'], {
+      detached: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env },
+    });
+
+    // ログをファイルに出力
+    const logStream = createWriteStream(LOG_FILE, { flags: 'a' });
+    child.stdout?.pipe(logStream);
+    child.stderr?.pipe(logStream);
+    child.unref();
+
+    // 少し待ってからPIDを確認
+    await new Promise(resolve => setTimeout(resolve, 1000));
+
+    const pid = readPid();
+    if (pid && isProcessRunning(pid)) {
+      return {
+        content: [{
+          type: 'text',
+          text: [
+            `✅ **Daemon started** (PID: ${pid})`,
+            ``,
+            `Schedules will now execute automatically.`,
+            `Log file: ${LOG_FILE}`,
+          ].join('\n'),
+        }],
+      };
+    } else {
+      return {
+        content: [{
+          type: 'text',
+          text: `❌ Failed to start daemon. Check the log file: ${LOG_FILE}`,
+        }],
+        isError: true,
+      };
+    }
+  }
+
+  private async handleDaemonStop() {
+    const { running, pid } = checkDaemonRunning();
+    if (!running || !pid) {
+      return {
+        content: [{
+          type: 'text',
+          text: `ℹ️ Daemon is not running.`,
+        }],
+      };
+    }
+
+    try {
+      process.kill(pid, 'SIGTERM');
+      return {
+        content: [{
+          type: 'text',
+          text: [
+            `✅ **Daemon stopped** (PID: ${pid})`,
+            ``,
+            `⚠️ Schedules will not execute until the daemon is restarted.`,
+          ].join('\n'),
+        }],
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        content: [{
+          type: 'text',
+          text: `❌ Failed to stop daemon: ${message}`,
+        }],
+        isError: true,
+      };
+    }
+  }
+
   async run(): Promise<void> {
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
     console.error('[MCP Server] claude-time started');
+
+    // デーモン状態をチェックし、停止していれば通知
+    this.checkDaemonHealth();
+  }
+
+  private checkDaemonHealth(): void {
+    const { running } = checkDaemonRunning();
+    if (!running) {
+      const scheduleCount = this.storage.getScheduleCount();
+      if (scheduleCount > 0) {
+        // スケジュールがあるのにデーモンが停止している場合のみ通知
+        sendNotification({
+          title: 'claude-time',
+          message: `⚠️ Daemon not running! ${scheduleCount} schedule(s) won't execute.`,
+          sound: true,
+        }).catch(() => {}); // エラーは無視
+        console.error('[MCP Server] Warning: Daemon is not running but schedules exist');
+      }
+    }
   }
 }

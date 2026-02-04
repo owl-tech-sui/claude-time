@@ -372,10 +372,224 @@ export function parseSchedule(input: string): ParseResult {
     };
   }
 
+  // ========================================
+  // 形式化フォーマット (daily@09:00 など)
+  // ========================================
+
+  // daily@HH:MM - 毎日
+  const dailyFormatMatch = normalized.match(/^daily@(\d{1,2}):(\d{2})$/);
+  if (dailyFormatMatch) {
+    const hour = parseInt(dailyFormatMatch[1], 10);
+    const minute = parseInt(dailyFormatMatch[2], 10);
+    if (isValidTime(hour, minute)) {
+      return {
+        success: true,
+        cron_expression: `${minute} ${hour} * * *`,
+        human_readable: `Daily at ${hour}:${minute.toString().padStart(2, '0')}`,
+      };
+    }
+  }
+
+  // weekly@DAY@HH:MM - 毎週
+  const weeklyFormatMatch = normalized.match(/^weekly@(sun|mon|tue|wed|thu|fri|sat)@(\d{1,2}):(\d{2})$/);
+  if (weeklyFormatMatch) {
+    const dayNum = WEEKDAYS[weeklyFormatMatch[1]];
+    const hour = parseInt(weeklyFormatMatch[2], 10);
+    const minute = parseInt(weeklyFormatMatch[3], 10);
+    if (dayNum !== undefined && isValidTime(hour, minute)) {
+      return {
+        success: true,
+        cron_expression: `${minute} ${hour} * * ${dayNum}`,
+        human_readable: `Weekly on ${weeklyFormatMatch[1]} at ${hour}:${minute.toString().padStart(2, '0')}`,
+      };
+    }
+  }
+
+  // monthly@DAY@HH:MM - 毎月 (DAY = 1-31 or "last")
+  const monthlyFormatMatch = normalized.match(/^monthly@(\d{1,2}|last)@(\d{1,2}):(\d{2})$/);
+  if (monthlyFormatMatch) {
+    const daySpec = monthlyFormatMatch[1];
+    const hour = parseInt(monthlyFormatMatch[2], 10);
+    const minute = parseInt(monthlyFormatMatch[3], 10);
+    if (isValidTime(hour, minute)) {
+      if (daySpec === 'last') {
+        // 月末は28-31日にワイルドカード的に設定（簡易実装）
+        return {
+          success: true,
+          cron_expression: `${minute} ${hour} 28-31 * *`,
+          human_readable: `Monthly on last day at ${hour}:${minute.toString().padStart(2, '0')}`,
+        };
+      } else {
+        const day = parseInt(daySpec, 10);
+        if (day >= 1 && day <= 31) {
+          return {
+            success: true,
+            cron_expression: `${minute} ${hour} ${day} * *`,
+            human_readable: `Monthly on day ${day} at ${hour}:${minute.toString().padStart(2, '0')}`,
+          };
+        }
+      }
+    }
+  }
+
+  // yearly@MM-DD@HH:MM - 毎年
+  const yearlyFormatMatch = normalized.match(/^yearly@(\d{1,2})-(\d{1,2})@(\d{1,2}):(\d{2})$/);
+  if (yearlyFormatMatch) {
+    const month = parseInt(yearlyFormatMatch[1], 10);
+    const day = parseInt(yearlyFormatMatch[2], 10);
+    const hour = parseInt(yearlyFormatMatch[3], 10);
+    const minute = parseInt(yearlyFormatMatch[4], 10);
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31 && isValidTime(hour, minute)) {
+      return {
+        success: true,
+        cron_expression: `${minute} ${hour} ${day} ${month} *`,
+        human_readable: `Yearly on ${month}/${day} at ${hour}:${minute.toString().padStart(2, '0')}`,
+      };
+    }
+  }
+
+  // once@YYYY-MM-DD@HH:MM - 一回限り
+  const onceFormatMatch = normalized.match(/^once@(\d{4})-(\d{1,2})-(\d{1,2})@(\d{1,2}):(\d{2})$/);
+  if (onceFormatMatch) {
+    const year = parseInt(onceFormatMatch[1], 10);
+    const month = parseInt(onceFormatMatch[2], 10);
+    const day = parseInt(onceFormatMatch[3], 10);
+    const hour = parseInt(onceFormatMatch[4], 10);
+    const minute = parseInt(onceFormatMatch[5], 10);
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31 && isValidTime(hour, minute)) {
+      return {
+        success: true,
+        cron_expression: `${minute} ${hour} ${day} ${month} *`,
+        human_readable: `Once on ${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')} at ${hour}:${minute.toString().padStart(2, '0')}`,
+      };
+    }
+  }
+
+  // ========================================
+  // 毎月・毎年の自然言語パターン
+  // ========================================
+
+  // 毎月X日Y時 / 毎月X日Y時Z分
+  const jpMonthlyMatch = normalized.match(/毎月\s*(\d{1,2})日\s*(\d{1,2})時(?:(\d{1,2})分)?/);
+  if (jpMonthlyMatch) {
+    const day = parseInt(jpMonthlyMatch[1], 10);
+    const hour = parseInt(jpMonthlyMatch[2], 10);
+    const minute = jpMonthlyMatch[3] ? parseInt(jpMonthlyMatch[3], 10) : 0;
+    if (day >= 1 && day <= 31 && isValidTime(hour, minute)) {
+      return {
+        success: true,
+        cron_expression: `${minute} ${hour} ${day} * *`,
+        human_readable: `毎月${day}日 ${hour}:${minute.toString().padStart(2, '0')}`,
+      };
+    }
+  }
+
+  // every Nth at TIME (every 1st at 10:00, every 15th at 9:00)
+  const engMonthlyMatch = normalized.match(/every\s+(\d{1,2})(?:st|nd|rd|th)?\s+(?:at\s+)?(.+)/);
+  if (engMonthlyMatch) {
+    const day = parseInt(engMonthlyMatch[1], 10);
+    const time = parseTime(engMonthlyMatch[2].trim());
+    if (day >= 1 && day <= 31 && time) {
+      return {
+        success: true,
+        cron_expression: `${time[1]} ${time[0]} ${day} * *`,
+        human_readable: `Every ${day}${getOrdinalSuffix(day)} at ${time[0]}:${time[1].toString().padStart(2, '0')}`,
+      };
+    }
+  }
+
+  // 月末X時 / 月末X時Y分
+  const jpLastDayMatch = normalized.match(/月末\s*(\d{1,2})時(?:(\d{1,2})分)?/);
+  if (jpLastDayMatch) {
+    const hour = parseInt(jpLastDayMatch[1], 10);
+    const minute = jpLastDayMatch[2] ? parseInt(jpLastDayMatch[2], 10) : 0;
+    if (isValidTime(hour, minute)) {
+      return {
+        success: true,
+        cron_expression: `${minute} ${hour} 28-31 * *`,
+        human_readable: `月末 ${hour}:${minute.toString().padStart(2, '0')}`,
+      };
+    }
+  }
+
+  // last day at TIME
+  const engLastDayMatch = normalized.match(/last\s+day\s+(?:at\s+)?(.+)/);
+  if (engLastDayMatch) {
+    const time = parseTime(engLastDayMatch[1].trim());
+    if (time) {
+      return {
+        success: true,
+        cron_expression: `${time[1]} ${time[0]} 28-31 * *`,
+        human_readable: `Last day at ${time[0]}:${time[1].toString().padStart(2, '0')}`,
+      };
+    }
+  }
+
+  // 毎年M月D日X時 / 毎年M月D日X時Y分
+  const jpYearlyMatch = normalized.match(/毎年\s*(\d{1,2})月(\d{1,2})日\s*(\d{1,2})時(?:(\d{1,2})分)?/);
+  if (jpYearlyMatch) {
+    const month = parseInt(jpYearlyMatch[1], 10);
+    const day = parseInt(jpYearlyMatch[2], 10);
+    const hour = parseInt(jpYearlyMatch[3], 10);
+    const minute = jpYearlyMatch[4] ? parseInt(jpYearlyMatch[4], 10) : 0;
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31 && isValidTime(hour, minute)) {
+      return {
+        success: true,
+        cron_expression: `${minute} ${hour} ${day} ${month} *`,
+        human_readable: `毎年${month}月${day}日 ${hour}:${minute.toString().padStart(2, '0')}`,
+      };
+    }
+  }
+
+  // every MONTH DAY at TIME (every january 1 at 0:00)
+  const engYearlyMatch = normalized.match(/every\s+(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})(?:st|nd|rd|th)?\s+(?:at\s+)?(.+)/);
+  if (engYearlyMatch) {
+    const monthNames: Record<string, number> = {
+      january: 1, february: 2, march: 3, april: 4, may: 5, june: 6,
+      july: 7, august: 8, september: 9, october: 10, november: 11, december: 12
+    };
+    const month = monthNames[engYearlyMatch[1]];
+    const day = parseInt(engYearlyMatch[2], 10);
+    const time = parseTime(engYearlyMatch[3].trim());
+    if (month && day >= 1 && day <= 31 && time) {
+      return {
+        success: true,
+        cron_expression: `${time[1]} ${time[0]} ${day} ${month} *`,
+        human_readable: `Every ${engYearlyMatch[1]} ${day} at ${time[0]}:${time[1].toString().padStart(2, '0')}`,
+      };
+    }
+  }
+
+  // 特定日付指定 YYYY-MM-DD HH:MM or YYYY/MM/DD HH:MM
+  const specificDateMatch = normalized.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})\s+(\d{1,2}):(\d{2})$/);
+  if (specificDateMatch) {
+    const year = parseInt(specificDateMatch[1], 10);
+    const month = parseInt(specificDateMatch[2], 10);
+    const day = parseInt(specificDateMatch[3], 10);
+    const hour = parseInt(specificDateMatch[4], 10);
+    const minute = parseInt(specificDateMatch[5], 10);
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31 && isValidTime(hour, minute)) {
+      return {
+        success: true,
+        cron_expression: `${minute} ${hour} ${day} ${month} *`,
+        human_readable: `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')} ${hour}:${minute.toString().padStart(2, '0')}`,
+      };
+    }
+  }
+
   return {
     success: false,
-    error: `Could not parse schedule: "${input}". Try formats like "every day at 9:00", "毎日9時", "9:00", "9時", "every 5 minutes", or a cron expression.`,
+    error: `Could not parse schedule: "${input}". Try formats like "daily@09:00", "weekly@mon@10:00", "monthly@1@09:00", "every day at 9:00", "毎日9時", or a cron expression.`,
   };
+}
+
+/**
+ * 序数の接尾辞を返す (1st, 2nd, 3rd, 4th...)
+ */
+function getOrdinalSuffix(n: number): string {
+  const s = ['th', 'st', 'nd', 'rd'];
+  const v = n % 100;
+  return s[(v - 20) % 10] || s[v] || s[0];
 }
 
 /**

@@ -2,6 +2,9 @@
  * claude-time 型定義
  */
 
+/** 実行モード */
+export type ExecutionMode = 'headless' | 'notify';
+
 /** スケジュールの基本情報 */
 export interface Schedule {
   id: string;
@@ -17,6 +20,10 @@ export interface Schedule {
   next_run_at: string | null;
   run_count: number;
   error_count: number;
+  /** 実行モード: 'headless' = claude -p で実行, 'notify' = tmuxに通知のみ */
+  mode: ExecutionMode;
+  /** tmux target (session:window.pane). 省略時は 'claude-time:0.1' */
+  tmux_target: string | null;
 }
 
 /** スケジュール作成時の入力 */
@@ -26,6 +33,10 @@ export interface ScheduleInput {
   prompt: string;
   working_directory?: string;
   description?: string;
+  /** 実行モード: 'headless' = claude -p で実行, 'notify' = tmuxに通知のみ (デフォルト: 'headless') */
+  mode?: ExecutionMode;
+  /** tmux target (session:window.pane). 省略時は 'claude-time:0.1' */
+  tmux_target?: string;
 }
 
 /** 実行ログ */

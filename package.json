@@ -1,6 +1,6 @@
 {
   "name": "claude-time",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "Claude Code用の汎用スケジューラーMCPサーバー",
   "type": "module",
   "main": "dist/index.js",

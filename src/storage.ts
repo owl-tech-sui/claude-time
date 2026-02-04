@@ -6,7 +6,7 @@ import Database from 'better-sqlite3';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { existsSync, mkdirSync } from 'fs';
-import type { Schedule, ExecutionLog, ExecutionStatus } from './types.js';
+import type { Schedule, ExecutionLog, ExecutionStatus, ExecutionMode } from './types.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -27,6 +27,7 @@ export class Storage {
     this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL');
     this.initTables();
+    this.migrate();
   }
 
   /** テーブル初期化 */
@@ -66,15 +67,34 @@ export class Storage {
     `);
   }
 
+  /** データベースマイグレーション（v0.3.0: mode, tmux_target追加） */
+  private migrate(): void {
+    // 既存カラムを確認
+    const columns = this.db.prepare("PRAGMA table_info(schedules)").all() as { name: string }[];
+    const columnNames = columns.map(c => c.name);
+
+    // mode カラムが存在しなければ追加
+    if (!columnNames.includes('mode')) {
+      this.db.exec("ALTER TABLE schedules ADD COLUMN mode TEXT DEFAULT 'headless'");
+    }
+
+    // tmux_target カラムが存在しなければ追加
+    if (!columnNames.includes('tmux_target')) {
+      this.db.exec("ALTER TABLE schedules ADD COLUMN tmux_target TEXT");
+    }
+  }
+
   /** スケジュール追加 */
   addSchedule(schedule: Schedule): void {
     const stmt = this.db.prepare(`
       INSERT INTO schedules (
         id, name, description, cron_expression, prompt, working_directory,
-        enabled, created_at, updated_at, last_run_at, next_run_at, run_count, error_count
+        enabled, created_at, updated_at, last_run_at, next_run_at, run_count, error_count,
+        mode, tmux_target
       ) VALUES (
         @id, @name, @description, @cron_expression, @prompt, @working_directory,
-        @enabled, @created_at, @updated_at, @last_run_at, @next_run_at, @run_count, @error_count
+        @enabled, @created_at, @updated_at, @last_run_at, @next_run_at, @run_count, @error_count,
+        @mode, @tmux_target
       )
     `);
     stmt.run({
@@ -136,7 +156,9 @@ export class Storage {
         last_run_at = @last_run_at,
         next_run_at = @next_run_at,
         run_count = @run_count,
-        error_count = @error_count
+        error_count = @error_count,
+        mode = @mode,
+        tmux_target = @tmux_target
       WHERE id = @id
     `);
     stmt.run({
@@ -306,6 +328,8 @@ export class Storage {
       next_run_at: row.next_run_at as string | null,
       run_count: row.run_count as number,
       error_count: row.error_count as number,
+      mode: (row.mode as ExecutionMode) || 'headless',
+      tmux_target: row.tmux_target as string | null,
     };
   }
 }

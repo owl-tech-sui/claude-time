@@ -9,12 +9,16 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { v4 as uuidv4 } from 'uuid';
-import { existsSync, statSync } from 'fs';
-import { isAbsolute, resolve } from 'path';
+import { existsSync, statSync, createWriteStream } from 'fs';
+import { isAbsolute, resolve, dirname, join } from 'path';
+import { spawn } from 'child_process';
+import { fileURLToPath } from 'url';
 import { Storage } from './storage.js';
 import { parseSchedule, getNextRunTime } from './parser.js';
 import { executeSchedule } from './executor.js';
 import { formatDateTime } from './config.js';
+import { checkDaemonRunning, readPid, isProcessRunning, LOG_FILE } from './pid.js';
+import { sendNotification } from './notifier.js';
 import type { Schedule, ScheduleInput, ScheduleAddResult } from './types.js';
 
 /**
@@ -56,7 +60,7 @@ export class MCPServer {
     this.server = new Server(
       {
         name: 'claude-time',
-        version: '0.1.0',
+        version: '0.3.0',
       },
       {
         capabilities: {
@@ -88,15 +92,24 @@ export class MCPServer {
               },
               prompt: {
                 type: 'string',
-                description: 'The prompt to execute with claude -p',
+                description: 'The prompt to execute with claude -p (headless mode) or the message to send to tmux (notify mode)',
               },
               working_directory: {
                 type: 'string',
-                description: 'Working directory for execution (optional)',
+                description: 'Working directory for execution (optional, only for headless mode)',
               },
               description: {
                 type: 'string',
                 description: 'Description of the schedule (optional)',
+              },
+              mode: {
+                type: 'string',
+                enum: ['headless', 'notify'],
+                description: "Execution mode: 'headless' runs claude -p in background (default), 'notify' sends message to existing tmux session",
+              },
+              tmux_target: {
+                type: 'string',
+                description: "tmux target pane for notify mode (format: 'session:window.pane'). Default: 'claude-time:0.1'",
               },
             },
             required: ['name', 'schedule', 'prompt'],
@@ -213,6 +226,15 @@ export class MCPServer {
                 type: 'string',
                 description: 'New working directory (optional)',
               },
+              mode: {
+                type: 'string',
+                enum: ['headless', 'notify'],
+                description: "New execution mode: 'headless' or 'notify' (optional)",
+              },
+              tmux_target: {
+                type: 'string',
+                description: "New tmux target pane for notify mode (optional)",
+              },
             },
             required: ['id'],
           },
@@ -228,6 +250,30 @@ export class MCPServer {
                 description: 'Delete logs older than this many days (default: 30)',
               },
             },
+          },
+        },
+        {
+          name: 'daemon_status',
+          description: 'Check if the daemon is running',
+          inputSchema: {
+            type: 'object',
+            properties: {},
+          },
+        },
+        {
+          name: 'daemon_start',
+          description: 'Start the daemon in background',
+          inputSchema: {
+            type: 'object',
+            properties: {},
+          },
+        },
+        {
+          name: 'daemon_stop',
+          description: 'Stop the daemon',
+          inputSchema: {
+            type: 'object',
+            properties: {},
           },
         },
       ],
@@ -267,10 +313,21 @@ export class MCPServer {
               schedule?: string;
               prompt?: string;
               working_directory?: string;
+              mode?: 'headless' | 'notify';
+              tmux_target?: string;
             });
 
           case 'schedule_cleanup':
             return this.handleScheduleCleanup(args as { days?: number });
+
+          case 'daemon_status':
+            return this.handleDaemonStatus();
+
+          case 'daemon_start':
+            return this.handleDaemonStart();
+
+          case 'daemon_stop':
+            return this.handleDaemonStop();
 
           default:
             throw new Error(`Unknown tool: ${name}`);
@@ -321,6 +378,9 @@ export class MCPServer {
     // 絶対パスに正規化
     const workingDir = input.working_directory ? resolve(input.working_directory) : null;
 
+    // 実行モードの決定
+    const mode = input.mode || 'headless';
+
     const schedule: Schedule = {
       id: uuidv4(),
       name: input.name,
@@ -335,6 +395,8 @@ export class MCPServer {
       next_run_at: nextRun?.toISOString() || null,
       run_count: 0,
       error_count: 0,
+      mode: mode,
+      tmux_target: input.tmux_target || null,
     };
 
     this.storage.addSchedule(schedule);
@@ -351,6 +413,17 @@ export class MCPServer {
       ? formatDateTime(nextRun)
       : 'Unknown';
 
+    // デーモン状態をチェック
+    const { running: daemonRunning } = checkDaemonRunning();
+    const daemonWarning = daemonRunning
+      ? ''
+      : `\n⚠️ **Warning**: Daemon is not running! Schedules won't execute.\nRun \`claude-time daemon start\` to start the daemon.`;
+
+    // モード情報
+    const modeInfo = schedule.mode === 'notify'
+      ? `- **Mode**: notify (sends to tmux: ${schedule.tmux_target || 'claude-time:0.1'})`
+      : `- **Mode**: headless (runs claude -p)`;
+
     return {
       content: [{
         type: 'text',
@@ -360,9 +433,9 @@ export class MCPServer {
           `- **Name**: ${result.name}`,
           `- **Cron**: ${result.cron_expression}`,
           `- **Next run**: ${nextRunFormatted}`,
+          modeInfo,
           `- **ID**: ${result.id}`,
-          ``,
-          `Note: Start the daemon with \`claude-time daemon start\` to execute schedules.`,
+          daemonWarning,
         ].join('\n'),
       }],
     };
@@ -382,10 +455,15 @@ export class MCPServer {
       const nextRun = s.next_run_at
         ? formatDateTime(s.next_run_at)
         : 'N/A';
+      const modeIcon = s.mode === 'notify' ? '📢' : '🤖';
+      const modeText = s.mode === 'notify'
+        ? `notify → ${s.tmux_target || 'claude-time:0.1'}`
+        : 'headless';
       return [
         `${status} **${s.name}**`,
         `   - Cron: ${s.cron_expression}`,
         `   - Next: ${nextRun}`,
+        `   - Mode: ${modeIcon} ${modeText}`,
         `   - Runs: ${s.run_count} (errors: ${s.error_count})`,
         `   - ID: ${s.id}`,
       ].join('\n');
@@ -605,6 +683,8 @@ export class MCPServer {
     schedule?: string;
     prompt?: string;
     working_directory?: string;
+    mode?: 'headless' | 'notify';
+    tmux_target?: string;
   }) {
     const existingSchedule = this.findSchedule(args.id);
     if (!existingSchedule) {
@@ -615,9 +695,9 @@ export class MCPServer {
     }
 
     // 更新項目が何も指定されていない場合
-    if (!args.name && !args.schedule && !args.prompt && args.working_directory === undefined) {
+    if (!args.name && !args.schedule && !args.prompt && args.working_directory === undefined && !args.mode && args.tmux_target === undefined) {
       return {
-        content: [{ type: 'text', text: 'Error: No update fields specified. Provide at least one of: name, schedule, prompt, working_directory' }],
+        content: [{ type: 'text', text: 'Error: No update fields specified. Provide at least one of: name, schedule, prompt, working_directory, mode, tmux_target' }],
         isError: true,
       };
     }
@@ -661,6 +741,8 @@ export class MCPServer {
     if (args.working_directory !== undefined) {
       updates.working_directory = args.working_directory ? resolve(args.working_directory) : null;
     }
+    if (args.mode !== undefined) updates.mode = args.mode;
+    if (args.tmux_target !== undefined) updates.tmux_target = args.tmux_target || null;
 
     this.storage.updateSchedule(existingSchedule.id, updates);
 
@@ -674,6 +756,8 @@ export class MCPServer {
     if (args.schedule) changedFields.push(`Schedule: ${updatedSchedule.cron_expression}`);
     if (args.prompt) changedFields.push(`Prompt: (updated)`);
     if (args.working_directory !== undefined) changedFields.push(`Working directory: ${updatedSchedule.working_directory || '(cleared)'}`);
+    if (args.mode) changedFields.push(`Mode: ${updatedSchedule.mode}`);
+    if (args.tmux_target !== undefined) changedFields.push(`tmux target: ${updatedSchedule.tmux_target || '(default)'}`);
 
     return {
       content: [{
@@ -714,9 +798,155 @@ export class MCPServer {
     };
   }
 
+  private async handleDaemonStatus() {
+    const { running, pid } = checkDaemonRunning();
+
+    if (!running) {
+      return {
+        content: [{
+          type: 'text',
+          text: [
+            `⚠️ **Daemon is not running**`,
+            ``,
+            `Schedules won't execute until the daemon is started.`,
+            `Use the \`daemon_start\` tool or run \`claude-time daemon start\` to start it.`,
+          ].join('\n'),
+        }],
+      };
+    }
+
+    const schedules = this.storage.getEnabledSchedules();
+    const nextSchedule = schedules.length > 0 && schedules[0].next_run_at
+      ? `Next: ${schedules[0].name} at ${formatDateTime(schedules[0].next_run_at)}`
+      : 'No scheduled tasks';
+
+    return {
+      content: [{
+        type: 'text',
+        text: [
+          `✅ **Daemon is running** (PID: ${pid})`,
+          ``,
+          `- Active schedules: ${schedules.length}`,
+          `- ${nextSchedule}`,
+          `- Log file: ${LOG_FILE}`,
+        ].join('\n'),
+      }],
+    };
+  }
+
+  private async handleDaemonStart() {
+    const { running, pid: existingPid } = checkDaemonRunning();
+    if (running) {
+      return {
+        content: [{
+          type: 'text',
+          text: `✅ Daemon is already running (PID: ${existingPid})`,
+        }],
+      };
+    }
+
+    // daemon.js のパスを取得
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = dirname(__filename);
+    const daemonScript = join(__dirname, 'daemon.js');
+
+    // バックグラウンドで起動
+    const child = spawn('node', [daemonScript, '--foreground'], {
+      detached: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env },
+    });
+
+    // ログをファイルに出力
+    const logStream = createWriteStream(LOG_FILE, { flags: 'a' });
+    child.stdout?.pipe(logStream);
+    child.stderr?.pipe(logStream);
+    child.unref();
+
+    // 少し待ってからPIDを確認
+    await new Promise(resolve => setTimeout(resolve, 1000));
+
+    const pid = readPid();
+    if (pid && isProcessRunning(pid)) {
+      return {
+        content: [{
+          type: 'text',
+          text: [
+            `✅ **Daemon started** (PID: ${pid})`,
+            ``,
+            `Schedules will now execute automatically.`,
+            `Log file: ${LOG_FILE}`,
+          ].join('\n'),
+        }],
+      };
+    } else {
+      return {
+        content: [{
+          type: 'text',
+          text: `❌ Failed to start daemon. Check the log file: ${LOG_FILE}`,
+        }],
+        isError: true,
+      };
+    }
+  }
+
+  private async handleDaemonStop() {
+    const { running, pid } = checkDaemonRunning();
+    if (!running || !pid) {
+      return {
+        content: [{
+          type: 'text',
+          text: `ℹ️ Daemon is not running.`,
+        }],
+      };
+    }
+
+    try {
+      process.kill(pid, 'SIGTERM');
+      return {
+        content: [{
+          type: 'text',
+          text: [
+            `✅ **Daemon stopped** (PID: ${pid})`,
+            ``,
+            `⚠️ Schedules will not execute until the daemon is restarted.`,
+          ].join('\n'),
+        }],
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        content: [{
+          type: 'text',
+          text: `❌ Failed to stop daemon: ${message}`,
+        }],
+        isError: true,
+      };
+    }
+  }
+
   async run(): Promise<void> {
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
     console.error('[MCP Server] claude-time started');
+
+    // デーモン状態をチェックし、停止していれば通知
+    this.checkDaemonHealth();
+  }
+
+  private checkDaemonHealth(): void {
+    const { running } = checkDaemonRunning();
+    if (!running) {
+      const scheduleCount = this.storage.getScheduleCount();
+      if (scheduleCount > 0) {
+        // スケジュールがあるのにデーモンが停止している場合のみ通知
+        sendNotification({
+          title: 'claude-time',
+          message: `⚠️ Daemon not running! ${scheduleCount} schedule(s) won't execute.`,
+          sound: true,
+        }).catch(() => {}); // エラーは無視
+        console.error('[MCP Server] Warning: Daemon is not running but schedules exist');
+      }
+    }
   }
 }

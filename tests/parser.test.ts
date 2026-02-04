@@ -115,6 +115,150 @@ describe('parseSchedule', () => {
     });
   });
 
+  describe('simple time patterns', () => {
+    it('should parse "11:09" as daily', () => {
+      const result = parseSchedule('11:09');
+      expect(result.success).toBe(true);
+      expect(result.cron_expression).toBe('9 11 * * *');
+    });
+
+    it('should parse "9時" as daily', () => {
+      const result = parseSchedule('9時');
+      expect(result.success).toBe(true);
+      expect(result.cron_expression).toBe('0 9 * * *');
+    });
+
+    it('should parse "21時30分" as daily', () => {
+      const result = parseSchedule('21時30分');
+      expect(result.success).toBe(true);
+      expect(result.cron_expression).toBe('30 21 * * *');
+    });
+
+    it('should parse "5分後" as one-time', () => {
+      const result = parseSchedule('5分後');
+      expect(result.success).toBe(true);
+      expect(result.cron_expression).toMatch(/^\d+ \d+ \d+ \d+ \*$/);
+    });
+
+    it('should parse "明日9時" as one-time', () => {
+      const result = parseSchedule('明日9時');
+      expect(result.success).toBe(true);
+      expect(result.cron_expression).toMatch(/^0 9 \d+ \d+ \*$/);
+    });
+
+    it('should parse "2時間後" as one-time', () => {
+      const result = parseSchedule('2時間後');
+      expect(result.success).toBe(true);
+      expect(result.cron_expression).toMatch(/^\d+ \d+ \d+ \d+ \*$/);
+    });
+
+    it('should parse "in 30 minutes" as one-time', () => {
+      const result = parseSchedule('in 30 minutes');
+      expect(result.success).toBe(true);
+      expect(result.cron_expression).toMatch(/^\d+ \d+ \d+ \d+ \*$/);
+    });
+
+    it('should parse "tomorrow at 9:00" as one-time', () => {
+      const result = parseSchedule('tomorrow at 9:00');
+      expect(result.success).toBe(true);
+      expect(result.cron_expression).toMatch(/^0 9 \d+ \d+ \*$/);
+    });
+  });
+
+  describe('formatted patterns', () => {
+    it('should parse "daily@09:00"', () => {
+      const result = parseSchedule('daily@09:00');
+      expect(result.success).toBe(true);
+      expect(result.cron_expression).toBe('0 9 * * *');
+    });
+
+    it('should parse "weekly@mon@10:00"', () => {
+      const result = parseSchedule('weekly@mon@10:00');
+      expect(result.success).toBe(true);
+      expect(result.cron_expression).toBe('0 10 * * 1');
+    });
+
+    it('should parse "monthly@1@09:00"', () => {
+      const result = parseSchedule('monthly@1@09:00');
+      expect(result.success).toBe(true);
+      expect(result.cron_expression).toBe('0 9 1 * *');
+    });
+
+    it('should parse "monthly@last@18:00"', () => {
+      const result = parseSchedule('monthly@last@18:00');
+      expect(result.success).toBe(true);
+      expect(result.cron_expression).toBe('0 18 28-31 * *');
+    });
+
+    it('should parse "yearly@01-01@00:00"', () => {
+      const result = parseSchedule('yearly@01-01@00:00');
+      expect(result.success).toBe(true);
+      expect(result.cron_expression).toBe('0 0 1 1 *');
+    });
+
+    it('should parse "once@2025-12-25@09:00"', () => {
+      const result = parseSchedule('once@2025-12-25@09:00');
+      expect(result.success).toBe(true);
+      expect(result.cron_expression).toBe('0 9 25 12 *');
+    });
+  });
+
+  describe('monthly/yearly patterns', () => {
+    it('should parse "毎月1日10時"', () => {
+      const result = parseSchedule('毎月1日10時');
+      expect(result.success).toBe(true);
+      expect(result.cron_expression).toBe('0 10 1 * *');
+    });
+
+    it('should parse "毎月15日9時30分"', () => {
+      const result = parseSchedule('毎月15日9時30分');
+      expect(result.success).toBe(true);
+      expect(result.cron_expression).toBe('30 9 15 * *');
+    });
+
+    it('should parse "every 1st at 10:00"', () => {
+      const result = parseSchedule('every 1st at 10:00');
+      expect(result.success).toBe(true);
+      expect(result.cron_expression).toBe('0 10 1 * *');
+    });
+
+    it('should parse "月末18時"', () => {
+      const result = parseSchedule('月末18時');
+      expect(result.success).toBe(true);
+      expect(result.cron_expression).toBe('0 18 28-31 * *');
+    });
+
+    it('should parse "last day at 18:00"', () => {
+      const result = parseSchedule('last day at 18:00');
+      expect(result.success).toBe(true);
+      expect(result.cron_expression).toBe('0 18 28-31 * *');
+    });
+
+    it('should parse "毎年1月1日0時"', () => {
+      const result = parseSchedule('毎年1月1日0時');
+      expect(result.success).toBe(true);
+      expect(result.cron_expression).toBe('0 0 1 1 *');
+    });
+
+    it('should parse "every january 1 at 0:00"', () => {
+      const result = parseSchedule('every january 1 at 0:00');
+      expect(result.success).toBe(true);
+      expect(result.cron_expression).toBe('0 0 1 1 *');
+    });
+
+    it('should parse "2025-12-25 09:00"', () => {
+      const result = parseSchedule('2025-12-25 09:00');
+      expect(result.success).toBe(true);
+      expect(result.cron_expression).toBe('0 9 25 12 *');
+    });
+
+    it('should parse "2025/12/25 09:00"', () => {
+      const result = parseSchedule('2025/12/25 09:00');
+      expect(result.success).toBe(true);
+      expect(result.cron_expression).toBe('0 9 25 12 *');
+    });
+  });
+
   describe('time validation', () => {
     it('should reject invalid hour (25:00)', () => {
       const result = parseSchedule('every day at 25:00');

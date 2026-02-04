@@ -5,10 +5,11 @@
 
 import cron from 'node-cron';
 import { Storage } from './storage.js';
-import { executeSchedule } from './executor.js';
+import { executeSchedule, ExecutionResult } from './executor.js';
 import { getNextRunTime } from './parser.js';
-import { getTimezone } from './config.js';
+import { getTimezone, getTmuxNotifyPane } from './config.js';
 import { notifySuccess, notifyFailure } from './notifier.js';
+import { sendNotificationToTmux } from './tmux.js';
 import type { Schedule } from './types.js';
 
 /** DB変更検知のポーリング間隔（ミリ秒） */
@@ -118,7 +119,8 @@ export class Scheduler {
       return;
     }
 
-    console.log(`[Scheduler] Running job: ${schedule.name}`);
+    const mode = schedule.mode || 'headless';
+    console.log(`[Scheduler] Running job: ${schedule.name} (mode: ${mode})`);
 
     // 実行ログを作成
     const logId = this.storage.addExecutionLog({
@@ -131,8 +133,15 @@ export class Scheduler {
     });
 
     try {
-      // Claude実行
-      const result = await executeSchedule(schedule);
+      let result: ExecutionResult;
+
+      if (mode === 'notify') {
+        // 通知モード: tmuxにメッセージを送る
+        result = await this.sendTmuxNotification(schedule);
+      } else {
+        // ヘッドレスモード: claude -p を実行
+        result = await executeSchedule(schedule);
+      }
 
       // ログを更新
       this.storage.updateExecutionLog(logId, {
@@ -153,7 +162,10 @@ export class Scheduler {
 
       if (result.success) {
         console.log(`[Scheduler] Job completed: ${schedule.name}`);
-        await notifySuccess(schedule.name);
+        // 通知モードの場合はOS通知をスキップ（tmuxに送信済み）
+        if (mode !== 'notify') {
+          await notifySuccess(schedule.name);
+        }
       } else {
         console.error(`[Scheduler] Job failed: ${schedule.name} - ${result.error}`);
         await notifyFailure(schedule.name, result.error);
@@ -174,6 +186,27 @@ export class Scheduler {
       console.error(`[Scheduler] Job error: ${schedule.name} - ${errorMessage}`);
       await notifyFailure(schedule.name, errorMessage);
     }
+  }
+
+  /**
+   * tmuxに通知を送信（notifyモード用）
+   */
+  private async sendTmuxNotification(schedule: Schedule): Promise<ExecutionResult> {
+    const target = schedule.tmux_target || getTmuxNotifyPane();
+
+    // メッセージを整形
+    const timestamp = new Date().toLocaleTimeString();
+    const message = `[claude-time ${timestamp}] ${schedule.name}\n${schedule.prompt}`;
+
+    // tmuxに送信
+    const success = sendNotificationToTmux(message, target);
+
+    return {
+      success,
+      output: success ? `Notification sent to ${target}` : 'Failed to send notification',
+      error: success ? undefined : `tmux target not available: ${target}`,
+      exitCode: success ? 0 : 1,
+    };
   }
 
   /** スケジュールをリロード */

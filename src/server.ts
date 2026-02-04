@@ -11,6 +11,7 @@ import {
 import { v4 as uuidv4 } from 'uuid';
 import { Storage } from './storage.js';
 import { parseSchedule, getNextRunTime } from './parser.js';
+import { formatDateTime } from './config.js';
 import type { Schedule, ScheduleInput, ScheduleAddResult } from './types.js';
 
 export class MCPServer {
@@ -243,7 +244,7 @@ export class MCPServer {
     };
 
     const nextRunFormatted = nextRun
-      ? nextRun.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })
+      ? formatDateTime(nextRun)
       : 'Unknown';
 
     return {
@@ -275,7 +276,7 @@ export class MCPServer {
     const lines = schedules.map((s) => {
       const status = s.enabled ? '✅' : '⏸️';
       const nextRun = s.next_run_at
-        ? new Date(s.next_run_at).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })
+        ? formatDateTime(s.next_run_at)
         : 'N/A';
       return [
         `${status} **${s.name}**`,
@@ -378,7 +379,7 @@ export class MCPServer {
 
     const lines = logs.map((log) => {
       const status = log.status === 'success' ? '✅' : log.status === 'failed' ? '❌' : '🔄';
-      const startedAt = new Date(log.started_at).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
+      const startedAt = formatDateTime(log.started_at);
       return [
         `${status} [${startedAt}]`,
         `   Schedule: ${log.schedule_id}`,

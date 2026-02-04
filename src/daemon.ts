@@ -8,6 +8,7 @@ import { createWriteStream } from 'fs';
 import { spawn } from 'child_process';
 import { Storage } from './storage.js';
 import { Scheduler } from './scheduler.js';
+import { formatDateTime } from './config.js';
 import {
   PID_FILE,
   LOG_FILE,
@@ -125,7 +126,7 @@ function showStatus(): void {
     console.log('\nSchedules:');
     for (const schedule of schedules) {
       const nextRun = schedule.next_run_at
-        ? new Date(schedule.next_run_at).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })
+        ? formatDateTime(schedule.next_run_at)
         : 'N/A';
       console.log(`  - ${schedule.name} (${schedule.cron_expression}) → Next: ${nextRun}`);
     }

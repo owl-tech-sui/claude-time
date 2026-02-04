@@ -7,6 +7,7 @@ import cron from 'node-cron';
 import { Storage } from './storage.js';
 import { executeSchedule } from './executor.js';
 import { getNextRunTime } from './parser.js';
+import { getTimezone } from './config.js';
 import type { Schedule } from './types.js';
 
 export class Scheduler {
@@ -64,7 +65,7 @@ export class Scheduler {
       await this.runJob(schedule.id);
     }, {
       scheduled: true,
-      timezone: 'Asia/Tokyo',
+      timezone: getTimezone(),
     });
 
     this.jobs.set(schedule.id, job);

@@ -146,6 +146,33 @@ node dist/cli.js logs
 node dist/cli.js logs "schedule-name" -n 20
 ```
 
+## Configuration
+
+### Timezone
+
+By default, claude-time uses your system's timezone. You can override it with environment variables:
+
+```bash
+# Option 1: Use CLAUDE_TIME_TZ
+export CLAUDE_TIME_TZ="America/New_York"
+
+# Option 2: Use standard TZ variable
+export TZ="Europe/London"
+```
+
+Priority order:
+1. `CLAUDE_TIME_TZ` environment variable
+2. `TZ` environment variable
+3. System default timezone
+
+### Locale
+
+Display format can be customized:
+
+```bash
+export CLAUDE_TIME_LOCALE="en-US"
+```
+
 ## Data Storage
 
 Schedules and execution logs are stored in `data/claude-time.db` (SQLite).

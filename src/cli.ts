@@ -301,8 +301,14 @@ function uninstall(): void {
 }
 
 /** tmuxセッションを起動してdaemonを開始 */
-async function start(): Promise<void> {
+async function start(workingDir?: string): Promise<void> {
   const sessionName = getTmuxSession();
+
+  // 作業ディレクトリのバリデーション
+  if (workingDir && !existsSync(workingDir)) {
+    console.error(`❌ Directory does not exist: ${workingDir}`);
+    return;
+  }
 
   // 1. tmuxインストール確認
   if (!isTmuxInstalled()) {
@@ -344,6 +350,13 @@ async function start(): Promise<void> {
   sendToPane(`${sessionName}:0.0`, `node "${daemonPath}" --foreground`);
   sendToPane(`${sessionName}:0.0`, 'Enter');
 
+  // 5. ユーザーペイン（Pane 1）の作業ディレクトリを設定
+  if (workingDir) {
+    console.log(`Setting working directory: ${workingDir}`);
+    sendToPane(`${sessionName}:0.1`, `cd "${workingDir}"`);
+    sendToPane(`${sessionName}:0.1`, 'Enter');
+  }
+
   // 少し待つ
   await new Promise(resolve => setTimeout(resolve, 1500));
 
@@ -355,7 +368,7 @@ async function start(): Promise<void> {
   console.log('');
   console.log(`   Session: ${sessionName}`);
   console.log(`   Pane 0: Daemon ${running ? `(PID: ${pid})` : '(starting...)'}`);
-  console.log(`   Pane 1: User shell (run 'claude' here)`);
+  console.log(`   Pane 1: User shell ${workingDir ? `(${workingDir})` : ''}`);
   console.log('');
   console.log('Commands:');
   console.log('   claude-time attach  - Attach to session');
@@ -479,9 +492,9 @@ Usage:
   claude-time <command> [options]
 
 Quick Start (tmux integration):
-  start            Create tmux session + start daemon (recommended)
-  stop             Stop daemon + destroy tmux session
-  attach           Attach to tmux session
+  start [--dir PATH]  Create tmux session + start daemon (recommended)
+  stop                Stop daemon + destroy tmux session
+  attach              Attach to tmux session
 
 Setup Commands (macOS auto-start):
   install          Install auto-start on login (launchd)
@@ -511,11 +524,12 @@ Note:
   - schedule_resume
 
 Examples:
-  claude-time start          # Start with tmux (recommended)
-  claude-time attach         # Attach to existing session
-  claude-time stop           # Stop everything
-  claude-time test-notify "Hello!"  # Test notification
-  claude-time list           # List schedules
+  claude-time start                        # Start with tmux (recommended)
+  claude-time start --dir /path/to/project # Start with specific working directory
+  claude-time attach                       # Attach to existing session
+  claude-time stop                         # Stop everything
+  claude-time test-notify "Hello!"         # Test notification
+  claude-time list                         # List schedules
 `);
 }
 
@@ -547,9 +561,28 @@ function parseLimitOption(args: string[]): number {
 const args = process.argv.slice(2);
 const command = args[0] || 'help';
 
+/**
+ * --dir オプションから作業ディレクトリをパースする
+ */
+function parseDirOption(args: string[]): string | undefined {
+  const dirIndex = args.indexOf('--dir');
+  if (dirIndex === -1) {
+    return undefined;
+  }
+
+  const dirArg = args[dirIndex + 1];
+  if (dirArg === undefined || dirArg.startsWith('-')) {
+    console.error('Error: --dir option requires a path');
+    return undefined;
+  }
+
+  return dirArg;
+}
+
 switch (command) {
   case 'start':
-    start().catch(console.error);
+    const workingDir = parseDirOption(args);
+    start(workingDir).catch(console.error);
     break;
 
   case 'stop':

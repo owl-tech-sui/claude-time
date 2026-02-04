@@ -9,10 +9,43 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { v4 as uuidv4 } from 'uuid';
+import { existsSync, statSync } from 'fs';
+import { isAbsolute, resolve } from 'path';
 import { Storage } from './storage.js';
 import { parseSchedule, getNextRunTime } from './parser.js';
+import { executeSchedule } from './executor.js';
 import { formatDateTime } from './config.js';
 import type { Schedule, ScheduleInput, ScheduleAddResult } from './types.js';
+
+/**
+ * working_directory のバリデーション
+ * @returns エラーメッセージ（問題がなければnull）
+ */
+function validateWorkingDirectory(dir: string | undefined): string | null {
+  if (!dir) return null; // 省略時はOK
+
+  // 絶対パスかチェック
+  if (!isAbsolute(dir)) {
+    return `working_directory must be an absolute path: "${dir}"`;
+  }
+
+  // 存在チェック
+  if (!existsSync(dir)) {
+    return `working_directory does not exist: "${dir}"`;
+  }
+
+  // ディレクトリかチェック
+  try {
+    const stat = statSync(dir);
+    if (!stat.isDirectory()) {
+      return `working_directory is not a directory: "${dir}"`;
+    }
+  } catch {
+    return `Cannot access working_directory: "${dir}"`;
+  }
+
+  return null;
+}
 
 export class MCPServer {
   private server: Server;
@@ -204,6 +237,15 @@ export class MCPServer {
   }
 
   private async handleScheduleAdd(input: ScheduleInput) {
+    // working_directory のバリデーション
+    const dirError = validateWorkingDirectory(input.working_directory);
+    if (dirError) {
+      return {
+        content: [{ type: 'text', text: `Error: ${dirError}` }],
+        isError: true,
+      };
+    }
+
     // スケジュールをパース
     const parseResult = parseSchedule(input.schedule);
     if (!parseResult.success || !parseResult.cron_expression) {
@@ -217,13 +259,16 @@ export class MCPServer {
     const nextRun = getNextRunTime(parseResult.cron_expression);
     const now = new Date().toISOString();
 
+    // 絶対パスに正規化
+    const workingDir = input.working_directory ? resolve(input.working_directory) : null;
+
     const schedule: Schedule = {
       id: uuidv4(),
       name: input.name,
       description: input.description || null,
       cron_expression: parseResult.cron_expression,
       prompt: input.prompt,
-      working_directory: input.working_directory || null,
+      working_directory: workingDir,
       enabled: true,
       created_at: now,
       updated_at: now,
@@ -406,23 +451,65 @@ export class MCPServer {
       };
     }
 
-    // ここでは実行せず、デーモンに任せる
-    // 即時実行が必要な場合は、デーモン経由で行う
-    return {
-      content: [{
-        type: 'text',
-        text: [
-          `To run "${schedule.name}" immediately:`,
-          ``,
-          `1. Make sure the daemon is running: \`claude-time daemon status\``,
-          `2. The daemon will execute at the scheduled time`,
-          ``,
-          `Schedule details:`,
-          `- Cron: ${schedule.cron_expression}`,
-          `- Prompt: ${schedule.prompt}`,
-        ].join('\n'),
-      }],
-    };
+    if (!schedule.enabled) {
+      return {
+        content: [{ type: 'text', text: `Schedule "${schedule.name}" is paused. Resume it first.` }],
+        isError: true,
+      };
+    }
+
+    // 実行ログを作成
+    const logId = this.storage.addExecutionLog({
+      schedule_id: schedule.id,
+      started_at: new Date().toISOString(),
+      completed_at: null,
+      status: 'running',
+      output: null,
+      error: null,
+    });
+
+    // 即時実行
+    const result = await executeSchedule(schedule);
+
+    // ログを更新
+    this.storage.updateExecutionLog(logId, {
+      completed_at: new Date().toISOString(),
+      status: result.success ? 'success' : 'failed',
+      output: result.output,
+      error: result.error || null,
+    });
+
+    // 実行回数を更新
+    this.storage.incrementRunCount(schedule.id, result.success);
+
+    if (result.success) {
+      return {
+        content: [{
+          type: 'text',
+          text: [
+            `✅ Schedule "${schedule.name}" executed successfully!`,
+            ``,
+            `**Output:**`,
+            '```',
+            result.output || '(no output)',
+            '```',
+          ].join('\n'),
+        }],
+      };
+    } else {
+      return {
+        content: [{
+          type: 'text',
+          text: [
+            `❌ Schedule "${schedule.name}" failed.`,
+            ``,
+            `**Error:** ${result.error}`,
+            result.output ? `\n**Output:**\n\`\`\`\n${result.output}\n\`\`\`` : '',
+          ].join('\n'),
+        }],
+        isError: true,
+      };
+    }
   }
 
   async run(): Promise<void> {

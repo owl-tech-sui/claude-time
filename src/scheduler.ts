@@ -8,6 +8,7 @@ import { Storage } from './storage.js';
 import { executeSchedule } from './executor.js';
 import { getNextRunTime } from './parser.js';
 import { getTimezone } from './config.js';
+import { notifySuccess, notifyFailure } from './notifier.js';
 import type { Schedule } from './types.js';
 
 /** DB変更検知のポーリング間隔（ミリ秒） */
@@ -152,8 +153,10 @@ export class Scheduler {
 
       if (result.success) {
         console.log(`[Scheduler] Job completed: ${schedule.name}`);
+        await notifySuccess(schedule.name);
       } else {
         console.error(`[Scheduler] Job failed: ${schedule.name} - ${result.error}`);
+        await notifyFailure(schedule.name, result.error);
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -169,6 +172,7 @@ export class Scheduler {
       this.storage.incrementRunCount(scheduleId, false);
 
       console.error(`[Scheduler] Job error: ${schedule.name} - ${errorMessage}`);
+      await notifyFailure(schedule.name, errorMessage);
     }
   }
 

@@ -9,9 +9,43 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { v4 as uuidv4 } from 'uuid';
+import { existsSync, statSync } from 'fs';
+import { isAbsolute, resolve } from 'path';
 import { Storage } from './storage.js';
 import { parseSchedule, getNextRunTime } from './parser.js';
+import { executeSchedule } from './executor.js';
+import { formatDateTime } from './config.js';
 import type { Schedule, ScheduleInput, ScheduleAddResult } from './types.js';
+
+/**
+ * working_directory のバリデーション
+ * @returns エラーメッセージ（問題がなければnull）
+ */
+function validateWorkingDirectory(dir: string | undefined): string | null {
+  if (!dir) return null; // 省略時はOK
+
+  // 絶対パスかチェック
+  if (!isAbsolute(dir)) {
+    return `working_directory must be an absolute path: "${dir}"`;
+  }
+
+  // 存在チェック
+  if (!existsSync(dir)) {
+    return `working_directory does not exist: "${dir}"`;
+  }
+
+  // ディレクトリかチェック
+  try {
+    const stat = statSync(dir);
+    if (!stat.isDirectory()) {
+      return `working_directory is not a directory: "${dir}"`;
+    }
+  } catch {
+    return `Cannot access working_directory: "${dir}"`;
+  }
+
+  return null;
+}
 
 export class MCPServer {
   private server: Server;
@@ -145,8 +179,55 @@ export class MCPServer {
                 type: 'string',
                 description: 'Schedule ID or name to run',
               },
+              dry_run: {
+                type: 'boolean',
+                description: 'Preview what would be executed without actually running (default: false)',
+              },
             },
             required: ['id'],
+          },
+        },
+        {
+          name: 'schedule_update',
+          description: 'Update an existing schedule',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              id: {
+                type: 'string',
+                description: 'Schedule ID or name to update',
+              },
+              name: {
+                type: 'string',
+                description: 'New name for the schedule (optional)',
+              },
+              schedule: {
+                type: 'string',
+                description: 'New schedule timing - natural language or cron expression (optional)',
+              },
+              prompt: {
+                type: 'string',
+                description: 'New prompt to execute (optional)',
+              },
+              working_directory: {
+                type: 'string',
+                description: 'New working directory (optional)',
+              },
+            },
+            required: ['id'],
+          },
+        },
+        {
+          name: 'schedule_cleanup',
+          description: 'Clean up old execution logs',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              days: {
+                type: 'number',
+                description: 'Delete logs older than this many days (default: 30)',
+              },
+            },
           },
         },
       ],
@@ -177,7 +258,19 @@ export class MCPServer {
             return this.handleScheduleLogs(args as { schedule_id?: string; limit?: number });
 
           case 'schedule_run':
-            return this.handleScheduleRun(args as { id: string });
+            return this.handleScheduleRun(args as { id: string; dry_run?: boolean });
+
+          case 'schedule_update':
+            return this.handleScheduleUpdate(args as {
+              id: string;
+              name?: string;
+              schedule?: string;
+              prompt?: string;
+              working_directory?: string;
+            });
+
+          case 'schedule_cleanup':
+            return this.handleScheduleCleanup(args as { days?: number });
 
           default:
             throw new Error(`Unknown tool: ${name}`);
@@ -203,6 +296,15 @@ export class MCPServer {
   }
 
   private async handleScheduleAdd(input: ScheduleInput) {
+    // working_directory のバリデーション
+    const dirError = validateWorkingDirectory(input.working_directory);
+    if (dirError) {
+      return {
+        content: [{ type: 'text', text: `Error: ${dirError}` }],
+        isError: true,
+      };
+    }
+
     // スケジュールをパース
     const parseResult = parseSchedule(input.schedule);
     if (!parseResult.success || !parseResult.cron_expression) {
@@ -216,13 +318,16 @@ export class MCPServer {
     const nextRun = getNextRunTime(parseResult.cron_expression);
     const now = new Date().toISOString();
 
+    // 絶対パスに正規化
+    const workingDir = input.working_directory ? resolve(input.working_directory) : null;
+
     const schedule: Schedule = {
       id: uuidv4(),
       name: input.name,
       description: input.description || null,
       cron_expression: parseResult.cron_expression,
       prompt: input.prompt,
-      working_directory: input.working_directory || null,
+      working_directory: workingDir,
       enabled: true,
       created_at: now,
       updated_at: now,
@@ -243,7 +348,7 @@ export class MCPServer {
     };
 
     const nextRunFormatted = nextRun
-      ? nextRun.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })
+      ? formatDateTime(nextRun)
       : 'Unknown';
 
     return {
@@ -275,7 +380,7 @@ export class MCPServer {
     const lines = schedules.map((s) => {
       const status = s.enabled ? '✅' : '⏸️';
       const nextRun = s.next_run_at
-        ? new Date(s.next_run_at).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })
+        ? formatDateTime(s.next_run_at)
         : 'N/A';
       return [
         `${status} **${s.name}**`,
@@ -378,7 +483,7 @@ export class MCPServer {
 
     const lines = logs.map((log) => {
       const status = log.status === 'success' ? '✅' : log.status === 'failed' ? '❌' : '🔄';
-      const startedAt = new Date(log.started_at).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
+      const startedAt = formatDateTime(log.started_at);
       return [
         `${status} [${startedAt}]`,
         `   Schedule: ${log.schedule_id}`,
@@ -396,7 +501,7 @@ export class MCPServer {
     };
   }
 
-  private async handleScheduleRun(args: { id: string }) {
+  private async handleScheduleRun(args: { id: string; dry_run?: boolean }) {
     const schedule = this.findSchedule(args.id);
     if (!schedule) {
       return {
@@ -405,20 +510,205 @@ export class MCPServer {
       };
     }
 
-    // ここでは実行せず、デーモンに任せる
-    // 即時実行が必要な場合は、デーモン経由で行う
+    // dry_run モードの場合は実行内容を表示するだけ
+    if (args.dry_run) {
+      const nextRun = schedule.next_run_at
+        ? formatDateTime(schedule.next_run_at)
+        : 'N/A';
+
+      return {
+        content: [{
+          type: 'text',
+          text: [
+            `🔍 **Dry Run Preview** for "${schedule.name}"`,
+            ``,
+            `**Would execute:**`,
+            '```',
+            `claude -p "${schedule.prompt}"`,
+            '```',
+            ``,
+            `**Working directory:** ${schedule.working_directory || '(default)'}`,
+            `**Cron expression:** ${schedule.cron_expression}`,
+            `**Next scheduled run:** ${nextRun}`,
+            `**Status:** ${schedule.enabled ? 'Enabled' : 'Paused'}`,
+            ``,
+            `ℹ️ No actual execution performed (dry run mode).`,
+          ].join('\n'),
+        }],
+      };
+    }
+
+    if (!schedule.enabled) {
+      return {
+        content: [{ type: 'text', text: `Schedule "${schedule.name}" is paused. Resume it first.` }],
+        isError: true,
+      };
+    }
+
+    // 実行ログを作成
+    const logId = this.storage.addExecutionLog({
+      schedule_id: schedule.id,
+      started_at: new Date().toISOString(),
+      completed_at: null,
+      status: 'running',
+      output: null,
+      error: null,
+    });
+
+    // 即時実行
+    const result = await executeSchedule(schedule);
+
+    // ログを更新
+    this.storage.updateExecutionLog(logId, {
+      completed_at: new Date().toISOString(),
+      status: result.success ? 'success' : 'failed',
+      output: result.output,
+      error: result.error || null,
+    });
+
+    // 実行回数を更新
+    this.storage.incrementRunCount(schedule.id, result.success);
+
+    if (result.success) {
+      return {
+        content: [{
+          type: 'text',
+          text: [
+            `✅ Schedule "${schedule.name}" executed successfully!`,
+            ``,
+            `**Output:**`,
+            '```',
+            result.output || '(no output)',
+            '```',
+          ].join('\n'),
+        }],
+      };
+    } else {
+      return {
+        content: [{
+          type: 'text',
+          text: [
+            `❌ Schedule "${schedule.name}" failed.`,
+            ``,
+            `**Error:** ${result.error}`,
+            result.output ? `\n**Output:**\n\`\`\`\n${result.output}\n\`\`\`` : '',
+          ].join('\n'),
+        }],
+        isError: true,
+      };
+    }
+  }
+
+  private async handleScheduleUpdate(args: {
+    id: string;
+    name?: string;
+    schedule?: string;
+    prompt?: string;
+    working_directory?: string;
+  }) {
+    const existingSchedule = this.findSchedule(args.id);
+    if (!existingSchedule) {
+      return {
+        content: [{ type: 'text', text: `Schedule not found: ${args.id}` }],
+        isError: true,
+      };
+    }
+
+    // 更新項目が何も指定されていない場合
+    if (!args.name && !args.schedule && !args.prompt && args.working_directory === undefined) {
+      return {
+        content: [{ type: 'text', text: 'Error: No update fields specified. Provide at least one of: name, schedule, prompt, working_directory' }],
+        isError: true,
+      };
+    }
+
+    // working_directory のバリデーション
+    if (args.working_directory) {
+      const dirError = validateWorkingDirectory(args.working_directory);
+      if (dirError) {
+        return {
+          content: [{ type: 'text', text: `Error: ${dirError}` }],
+          isError: true,
+        };
+      }
+    }
+
+    // スケジュールが指定された場合はパース
+    let cronExpression = existingSchedule.cron_expression;
+    let nextRunAt = existingSchedule.next_run_at;
+
+    if (args.schedule) {
+      const parseResult = parseSchedule(args.schedule);
+      if (!parseResult.success || !parseResult.cron_expression) {
+        return {
+          content: [{ type: 'text', text: `Error: ${parseResult.error}` }],
+          isError: true,
+        };
+      }
+      cronExpression = parseResult.cron_expression;
+      const nextRun = getNextRunTime(cronExpression);
+      nextRunAt = nextRun?.toISOString() || null;
+    }
+
+    // 更新データを構築
+    const updates: Partial<Schedule> = {
+      cron_expression: cronExpression,
+      next_run_at: nextRunAt,
+    };
+
+    if (args.name !== undefined) updates.name = args.name;
+    if (args.prompt !== undefined) updates.prompt = args.prompt;
+    if (args.working_directory !== undefined) {
+      updates.working_directory = args.working_directory ? resolve(args.working_directory) : null;
+    }
+
+    this.storage.updateSchedule(existingSchedule.id, updates);
+
+    const updatedSchedule = this.storage.getSchedule(existingSchedule.id)!;
+    const nextRunFormatted = updatedSchedule.next_run_at
+      ? formatDateTime(updatedSchedule.next_run_at)
+      : 'N/A';
+
+    const changedFields: string[] = [];
+    if (args.name) changedFields.push(`Name: ${updatedSchedule.name}`);
+    if (args.schedule) changedFields.push(`Schedule: ${updatedSchedule.cron_expression}`);
+    if (args.prompt) changedFields.push(`Prompt: (updated)`);
+    if (args.working_directory !== undefined) changedFields.push(`Working directory: ${updatedSchedule.working_directory || '(cleared)'}`);
+
     return {
       content: [{
         type: 'text',
         text: [
-          `To run "${schedule.name}" immediately:`,
+          `✅ Schedule "${updatedSchedule.name}" updated successfully!`,
           ``,
-          `1. Make sure the daemon is running: \`claude-time daemon status\``,
-          `2. The daemon will execute at the scheduled time`,
+          `**Updated fields:**`,
+          ...changedFields.map(f => `- ${f}`),
           ``,
-          `Schedule details:`,
-          `- Cron: ${schedule.cron_expression}`,
-          `- Prompt: ${schedule.prompt}`,
+          `**Next run:** ${nextRunFormatted}`,
+        ].join('\n'),
+      }],
+    };
+  }
+
+  private async handleScheduleCleanup(args: { days?: number }) {
+    const days = args.days ?? 30;
+
+    if (days < 1) {
+      return {
+        content: [{ type: 'text', text: 'Error: days must be at least 1' }],
+        isError: true,
+      };
+    }
+
+    const deletedCount = this.storage.deleteOldLogs(days);
+
+    return {
+      content: [{
+        type: 'text',
+        text: [
+          `🧹 Log cleanup completed!`,
+          ``,
+          `- Deleted **${deletedCount}** log entries older than ${days} days.`,
         ].join('\n'),
       }],
     };

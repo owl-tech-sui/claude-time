@@ -12,6 +12,7 @@ import {
   isProcessRunning,
   checkDaemonRunning,
 } from './pid.js';
+import { formatDateTime, getConfigInfo } from './config.js';
 
 /** デーモン開始 */
 function daemonStart(): void {
@@ -80,7 +81,7 @@ function daemonStatus(): void {
     console.log('\nSchedules:');
     for (const schedule of schedules) {
       const nextRun = schedule.next_run_at
-        ? new Date(schedule.next_run_at).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })
+        ? formatDateTime(schedule.next_run_at)
         : 'N/A';
       console.log(`  - ${schedule.name}`);
       console.log(`    Cron: ${schedule.cron_expression}`);
@@ -105,7 +106,7 @@ function listSchedules(): void {
   for (const schedule of schedules) {
     const status = schedule.enabled ? '✅' : '⏸️';
     const nextRun = schedule.next_run_at
-      ? new Date(schedule.next_run_at).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })
+      ? formatDateTime(schedule.next_run_at)
       : 'N/A';
 
     console.log(`${status} ${schedule.name}`);
@@ -142,7 +143,7 @@ function showLogs(scheduleId?: string, limit: number = 10): void {
 
   for (const log of logs) {
     const status = log.status === 'success' ? '✅' : log.status === 'failed' ? '❌' : '🔄';
-    const startedAt = new Date(log.started_at).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
+    const startedAt = formatDateTime(log.started_at);
 
     console.log(`${status} [${startedAt}]`);
     console.log(`   Schedule: ${log.schedule_id}`);

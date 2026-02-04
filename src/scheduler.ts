@@ -7,12 +7,19 @@ import cron from 'node-cron';
 import { Storage } from './storage.js';
 import { executeSchedule } from './executor.js';
 import { getNextRunTime } from './parser.js';
+import { getTimezone } from './config.js';
+import { notifySuccess, notifyFailure } from './notifier.js';
 import type { Schedule } from './types.js';
+
+/** DB変更検知のポーリング間隔（ミリ秒） */
+const POLL_INTERVAL_MS = 30_000; // 30秒
 
 export class Scheduler {
   private storage: Storage;
   private jobs: Map<string, cron.ScheduledTask> = new Map();
   private running: boolean = false;
+  private pollTimer: NodeJS.Timeout | null = null;
+  private lastChecksum: string = '';
 
   constructor(storage: Storage) {
     this.storage = storage;
@@ -29,12 +36,21 @@ export class Scheduler {
       this.scheduleJob(schedule);
     }
 
+    // チェックサムを記録
+    this.lastChecksum = this.storage.getScheduleChecksum();
+
+    // DB変更検知ポーリングを開始
+    this.startPolling();
+
     console.log(`[Scheduler] Started with ${schedules.length} schedule(s)`);
   }
 
   /** スケジューラーを停止 */
   stop(): void {
     if (!this.running) return;
+
+    // ポーリングを停止
+    this.stopPolling();
 
     for (const [id, job] of this.jobs) {
       job.stop();
@@ -64,7 +80,7 @@ export class Scheduler {
       await this.runJob(schedule.id);
     }, {
       scheduled: true,
-      timezone: 'Asia/Tokyo',
+      timezone: getTimezone(),
     });
 
     this.jobs.set(schedule.id, job);
@@ -137,8 +153,10 @@ export class Scheduler {
 
       if (result.success) {
         console.log(`[Scheduler] Job completed: ${schedule.name}`);
+        await notifySuccess(schedule.name);
       } else {
         console.error(`[Scheduler] Job failed: ${schedule.name} - ${result.error}`);
+        await notifyFailure(schedule.name, result.error);
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -154,6 +172,7 @@ export class Scheduler {
       this.storage.incrementRunCount(scheduleId, false);
 
       console.error(`[Scheduler] Job error: ${schedule.name} - ${errorMessage}`);
+      await notifyFailure(schedule.name, errorMessage);
     }
   }
 
@@ -173,6 +192,9 @@ export class Scheduler {
       this.scheduleJob(schedule);
     }
 
+    // チェックサムを更新
+    this.lastChecksum = this.storage.getScheduleChecksum();
+
     console.log(`[Scheduler] Reloaded ${schedules.length} schedule(s)`);
   }
 
@@ -184,5 +206,38 @@ export class Scheduler {
   /** スケジュール数 */
   getJobCount(): number {
     return this.jobs.size;
+  }
+
+  /** DB変更検知ポーリングを開始 */
+  private startPolling(): void {
+    if (this.pollTimer) return;
+
+    this.pollTimer = setInterval(() => {
+      this.checkForChanges();
+    }, POLL_INTERVAL_MS);
+
+    console.log(`[Scheduler] Started DB change detection (every ${POLL_INTERVAL_MS / 1000}s)`);
+  }
+
+  /** DB変更検知ポーリングを停止 */
+  private stopPolling(): void {
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+      console.log('[Scheduler] Stopped DB change detection');
+    }
+  }
+
+  /** DB変更をチェックしてリロード */
+  private checkForChanges(): void {
+    try {
+      const currentChecksum = this.storage.getScheduleChecksum();
+      if (currentChecksum !== this.lastChecksum) {
+        console.log('[Scheduler] Schedule changes detected, reloading...');
+        this.reload();
+      }
+    } catch (error) {
+      console.error('[Scheduler] Error checking for changes:', error);
+    }
   }
 }

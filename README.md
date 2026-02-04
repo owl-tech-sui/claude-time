@@ -1,32 +1,64 @@
 # claude-time
 
-Claude Code用の汎用スケジューラーMCPサーバー
+A universal scheduler MCP server for Claude Code.
 
-どのプロジェクトでも使える、自然言語でスケジュール設定できるMCPサーバーです。
+Schedule tasks using natural language and let Claude Code execute them automatically in headless mode.
 
-## 機能
+## Features
 
-- 自然言語でスケジュール設定（「毎日9時」「every 5 minutes」など）
-- cron式も直接使用可能
-- Claude Code（Headless Mode）でタスク実行
-- SQLiteでスケジュール永続化
-- バックグラウンドデーモンで自動実行
+- Natural language scheduling ("every day at 9:00", "every 5 minutes", etc.)
+- Japanese language support ("毎日9時", "5分ごと", etc.)
+- Direct cron expressions also supported
+- Task execution via Claude Code Headless Mode (`claude -p`)
+- SQLite persistence for schedules and logs
+- Background daemon for automatic execution
 
-## インストール
+## Architecture
+
+```mermaid
+graph TB
+    subgraph "User Interaction"
+        CC[Claude Code]
+    end
+
+    subgraph "claude-time"
+        MCP[MCP Server]
+        DB[(SQLite)]
+        Daemon[Daemon Process]
+    end
+
+    subgraph "Execution"
+        Headless[claude -p<br/>Headless Mode]
+    end
+
+    CC -->|MCP Protocol| MCP
+    MCP -->|Read/Write| DB
+    Daemon -->|Read| DB
+    Daemon -->|Trigger| Headless
+
+    style CC fill:#6366f1,color:#fff
+    style MCP fill:#10b981,color:#fff
+    style Daemon fill:#f59e0b,color:#fff
+    style Headless fill:#6366f1,color:#fff
+    style DB fill:#64748b,color:#fff
+```
+
+## Installation
 
 ```bash
-cd ~/dev/claude-time
+git clone https://github.com/owl-tech-sui/claude-time.git
+cd claude-time
 npm install
 npm run build
 ```
 
-## Claude Codeへの登録
+## Register with Claude Code
 
 ```bash
-claude mcp add claude-time -t stdio -- node ~/dev/claude-time/dist/index.js
+claude mcp add claude-time -t stdio -- node /path/to/claude-time/dist/index.js
 ```
 
-または、`~/.claude.json` を直接編集:
+Or manually edit `~/.claude.json`:
 
 ```json
 {
@@ -34,105 +66,124 @@ claude mcp add claude-time -t stdio -- node ~/dev/claude-time/dist/index.js
     "claude-time": {
       "type": "stdio",
       "command": "node",
-      "args": ["/Users/win/dev/claude-time/dist/index.js"]
+      "args": ["/path/to/claude-time/dist/index.js"]
     }
   }
 }
 ```
 
-## 使い方
+## Usage
 
-### Claude Code内でスケジュール管理
+### Schedule Management in Claude Code
 
 ```
 $ claude
-> 毎日9時にgit statusを確認するスケジュール追加して
+> Add a schedule to check git status every day at 9:00
 
-Claude: スケジュールを追加しました！
-  - 名前: git status確認
-  - 実行時間: 毎日 09:00
-  - 次回実行: 明日 09:00
+Claude: Schedule added successfully!
+  - Name: git status check
+  - Cron: 0 9 * * *
+  - Next run: Tomorrow 09:00
 ```
 
-### サポートする自然言語パターン
+### Supported Natural Language Patterns
 
-| 入力例 | cron式 |
-|--------|--------|
+| Input | Cron Expression |
+|-------|-----------------|
 | `every 5 minutes` | `*/5 * * * *` |
-| `5分ごと` | `*/5 * * * *` |
 | `every hour` | `0 * * * *` |
 | `every day at 9:00` | `0 9 * * *` |
-| `毎日9時` | `0 9 * * *` |
 | `daily at 21:30` | `30 21 * * *` |
 | `every monday at 10:00` | `0 10 * * 1` |
-| `毎週月曜9時` | `0 9 * * 1` |
 | `weekdays at 9:00` | `0 9 * * 1-5` |
-| `平日9時` | `0 9 * * 1-5` |
 | `weekend at 18:00` | `0 18 * * 0,6` |
 
-### MCPツール
+Japanese patterns are also supported:
 
-- `schedule_add` - スケジュール追加
-- `schedule_list` - スケジュール一覧
-- `schedule_remove` - スケジュール削除
-- `schedule_pause` - スケジュール一時停止
-- `schedule_resume` - スケジュール再開
-- `schedule_logs` - 実行ログ確認
+| Input | Cron Expression |
+|-------|-----------------|
+| `5分ごと` | `*/5 * * * *` |
+| `毎日9時` | `0 9 * * *` |
+| `毎週月曜9時` | `0 9 * * 1` |
+| `平日9時` | `0 9 * * 1-5` |
 
-### デーモン管理
+### MCP Tools
 
-スケジュールを自動実行するにはデーモンを起動する必要があります。
+| Tool | Description |
+|------|-------------|
+| `schedule_add` | Add a new schedule |
+| `schedule_list` | List all schedules |
+| `schedule_remove` | Remove a schedule |
+| `schedule_pause` | Pause a schedule |
+| `schedule_resume` | Resume a paused schedule |
+| `schedule_logs` | View execution logs |
 
-```bash
-# デーモン起動
-claude-time daemon start
+### Daemon Management
 
-# ステータス確認
-claude-time daemon status
-
-# デーモン停止
-claude-time daemon stop
-```
-
-### CLI
+The daemon must be running to execute scheduled tasks.
 
 ```bash
-# スケジュール一覧
-claude-time list
+# Start daemon
+node dist/daemon.js start
 
-# 実行ログ確認
-claude-time logs
+# Check status
+node dist/daemon.js status
 
-# 特定スケジュールのログ
-claude-time logs "git status確認" -n 20
+# Stop daemon
+node dist/daemon.js stop
 ```
 
-## アーキテクチャ
+### CLI Commands
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                    Claude Code                          │
-│  (自然言語でスケジュール指示)                             │
-└───────────────────────┬─────────────────────────────────┘
-                        │ MCP Protocol (stdio)
-                        ▼
-┌─────────────────────────────────────────────────────────┐
-│              claude-time MCP Server                     │
-│  - スケジュール管理ツール                                │
-│  - SQLite ストレージ                                    │
-└─────────────────────────────────────────────────────────┘
+```bash
+# List all schedules
+node dist/cli.js list
 
-┌─────────────────────────────────────────────────────────┐
-│              claude-time Daemon                         │
-│  - node-cron でタイムトリガー                           │
-│  - claude -p でHeadless実行                             │
-└─────────────────────────────────────────────────────────┘
+# View execution logs
+node dist/cli.js logs
+
+# View logs for specific schedule
+node dist/cli.js logs "schedule-name" -n 20
 ```
 
-## データ
+## Configuration
 
-スケジュールと実行ログは `data/claude-time.db` (SQLite) に保存されます。
+### Timezone
 
-## ライセンス
+By default, claude-time uses your system's timezone. You can override it with environment variables:
+
+```bash
+# Option 1: Use CLAUDE_TIME_TZ
+export CLAUDE_TIME_TZ="America/New_York"
+
+# Option 2: Use standard TZ variable
+export TZ="Europe/London"
+```
+
+Priority order:
+1. `CLAUDE_TIME_TZ` environment variable
+2. `TZ` environment variable
+3. System default timezone
+
+### Locale
+
+Display format can be customized:
+
+```bash
+export CLAUDE_TIME_LOCALE="en-US"
+```
+
+## Data Storage
+
+Schedules and execution logs are stored in `data/claude-time.db` (SQLite).
+
+## Tech Stack
+
+- **Language**: TypeScript
+- **MCP SDK**: @modelcontextprotocol/sdk
+- **Scheduler**: node-cron
+- **Storage**: better-sqlite3
+
+## License
 
 MIT

@@ -256,6 +256,35 @@ export class Storage {
     stmt.run(nextRunAt, new Date().toISOString(), id);
   }
 
+  /** スケジュールの状態チェックサム（変更検知用） */
+  getScheduleChecksum(): string {
+    const stmt = this.db.prepare(`
+      SELECT GROUP_CONCAT(id || ':' || enabled || ':' || cron_expression, ',') as checksum
+      FROM schedules
+      ORDER BY id
+    `);
+    const row = stmt.get() as { checksum: string | null } | undefined;
+    return row?.checksum || '';
+  }
+
+  /** スケジュール数を取得 */
+  getScheduleCount(): number {
+    const stmt = this.db.prepare('SELECT COUNT(*) as count FROM schedules');
+    const row = stmt.get() as { count: number };
+    return row.count;
+  }
+
+  /** 古い実行ログを削除 */
+  deleteOldLogs(days: number): number {
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - days);
+    const cutoffISO = cutoffDate.toISOString();
+
+    const stmt = this.db.prepare('DELETE FROM execution_logs WHERE started_at < ?');
+    const result = stmt.run(cutoffISO);
+    return result.changes;
+  }
+
   /** DBを閉じる */
   close(): void {
     this.db.close();
